@@ -1,5 +1,5 @@
 # Manguonmo_BT5
-https://github.com/hoangquyencode/Manguonmo_BT5/blob/main/%C4%90ebai.md
+Đề đây: https://github.com/hoangquyencode/Manguonmo_BT5/blob/main/%C4%90ebai.md
 ## Lý thuyết
 
 ### 1. Docker là gì?
@@ -244,4 +244,8 @@ docker compose up -d
 ```
 
 Sau khi hoàn tất, Docker sẽ tạo và chạy các container từ các Image đã được nạp sẵn mà không cần kết nối Internet.
+
+
+## Thực hành
+
 
