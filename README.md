@@ -243,9 +243,314 @@ Di chuyển đến thư mục chứa file `docker-compose.yml` và thực hiện
 docker compose up -d
 ```
 
+
+
 Sau khi hoàn tất, Docker sẽ tạo và chạy các container từ các Image đã được nạp sẵn mà không cần kết nối Internet.
 
 
 ## Thực hành
+
+Hệ sinh thái
+
+
+
+```text
+                          (Ghi giá trị tức thời)
+┌───────────┐ ────────────────────────────────► ┌───────────┐ ◄──── ┌───────────┐
+│ Node-RED  │                                   │  MariaDB  │       │ Flask API │
+└─────┬─────┘                                   └───────────┘       └─────┬─────┘
+      │                                                    ▲               │
+      │ (Ghi dữ liệu chuỗi thời gian)                      │               │ (Truy vấn dữ liệu)
+      ▼                                                    │               ▼
+
+┌───────────┐                                    ┌─────────────────────────────┐
+│ InfluxDB  │                                    │        Nginx Frontend       │
+└─────┬─────┘                                    │      (html/index.html)      │
+      │                                           └──────────────┬─────────────┘
+      │ (Cung cấp dữ liệu cho Grafana)                           │
+      ▼                                                          │ (Nhúng Dashboard)
+┌───────────┐                                                    │
+│  Grafana  │ ───────────────────────────────────────────────────┘
+└───────────┘
+```
+
+# 1. Tạo cấu trúc thư mục dự án
+mkdir -p monitor-app/flask-api monitor-app/nginx-frontend/html
+cd monitor-app
+
+# 2. Tạo nhanh file docker-compose.yml
+cat << 'EOF' > docker-compose.yml
+version: '3.8'
+services:
+  nodered:
+    image: nodered/node-red:latest
+    container_name: nodered_service
+    ports:
+      - "1880:1880"
+    volumes:
+      - nodered_data:/data
+    networks:
+      - monitor-net
+    restart: unless-stopped
+
+  mariadb:
+    image: mariadb:latest
+    container_name: mariadb_service
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: monitor_db
+      MYSQL_USER: app_user
+      MYSQL_PASSWORD: app_password
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - monitor-net
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: influxdb_service
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword
+      - DOCKER_INFLUXDB_INIT_ORG=myorg
+      - DOCKER_INFLUXDB_INIT_BUCKET=history_bucket
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    networks:
+      - monitor-net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana_service
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitor-net
+    restart: unless-stopped
+
+  flask-api:
+    build: ./flask-api
+    container_name: flask_api_service
+    ports:
+      - "5000:5000"
+    environment:
+      - DB_HOST=mariadb
+      - DB_USER=app_user
+      - DB_PASSWORD=app_password
+      - DB_NAME=monitor_db
+    depends_on:
+      - mariadb
+    networks:
+      - monitor-net
+    restart: unless-stopped
+
+  nginx-frontend:
+    image: nginx:alpine
+    container_name: nginx_service
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx-frontend/html:/usr/share/nginx/html
+      - ./nginx-frontend/default.conf:/etc/nginx/conf.d/default.conf
+    networks:
+      - monitor-net
+    restart: unless-stopped
+
+volumes:
+  nodered_data:
+  mariadb_data:
+  influxdb_data:
+  grafana_data:
+
+networks:
+  monitor-net:
+    driver: bridge
+EOF
+
+# 3. Tạo các file cho Flask API
+cat << 'EOF' > flask-api/requirements.txt
+Flask==3.0.0
+mysql-connector-python==8.2.0
+Flask-CORS==4.0.0
+EOF
+
+cat << 'EOF' > flask-api/Dockerfile
+FROM python:3.10-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py .
+CMD ["python", "app.py"]
+EOF
+
+cat << 'EOF' > flask-api/app.py
+import os
+from flask import Flask, jsonify
+from flask_cors import CORS
+import mysql.connector
+
+app = Flask(__name__)
+CORS(app)
+
+def get_db_connection():
+    return mysql.connector.connect(
+        host=os.environ.get('DB_HOST', 'localhost'),
+        user=os.environ.get('DB_USER', 'app_user'),
+        password=os.environ.get('DB_PASSWORD', 'app_password'),
+        database=os.environ.get('DB_NAME', 'monitor_db')
+    )
+
+conn = get_db_connection()
+cursor = conn.cursor()
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS realtime_data (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        device_name VARCHAR(50),
+        val_value FLOAT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+""")
+conn.close()
+
+@app.route('/api/live', methods=['GET'])
+def get_live_data():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT val_value, timestamp FROM realtime_data ORDER BY id DESC LIMIT 1")
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if result:
+            return jsonify({"status": "success", "data": result})
+        return jsonify({"status": "empty", "data": {"val_value": 0, "timestamp": "-"}})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+EOF
+
+# 4. Tạo các file cho Nginx Frontend
+cat << 'EOF' > nginx-frontend/default.conf
+server {
+    listen 80;
+    server_name localhost;
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+    }
+}
+EOF
+
+cat << 'EOF' > nginx-frontend/html/index.html
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Hệ thống Giám sát Realtime</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f4f6f9; text-align: center; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .card { background: #2c3e50; color: white; padding: 20px; display: inline-block; border-radius: 8px; font-size: 24px; margin-bottom: 20px; }
+        .value { font-size: 48px; font-weight: bold; color: #2ecc71; }
+        iframe { width: 100%; height: 450px; border: none; border-radius: 8px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>HỆ THỐNG GIÁM SÁT REALTIME</h2>
+        <div class="card">
+            <div>Giá trị tức thời (MariaDB):</div>
+            <div id="live-value" class="value">--</div>
+            <div style="font-size: 14px; color: #bdc3c7;">Cập nhật lúc: <span id="live-time">-</span></div>
+        </div>
+        <h3>Đồ thị lịch sử (Grafana Iframe)</h3>
+        <iframe id="grafana-frame" src="http://192.168.100.10:3000/d-solo/your-dashboard-id/history?orgId=1&panelId=1&refresh=5s"></iframe>
+    </div>
+    <script>
+        function fetchLive_Data() {
+            fetch('http://192.168.100.10:5000/api/live')
+                .then(response => response.json())
+                .then(res => {
+                    if(res.status === 'success') {
+                        document.getElementById('live-value').innerText = res.data.val_value;
+                        document.getElementById('live-time').innerText = new Date(res.data.timestamp).toLocaleTimeString();
+                    }
+                })
+                .catch(err => console.error("Lỗi gọi API: ", err));
+        }
+        fetchLive_Data();
+        setInterval(fetchLive_Data, 2000);
+    </script>
+</body>
+</html>
+EOF
+
+
+# Node-Red
+
+
+
+
+
+
+
+<img width="1915" height="955" alt="image" src="https://github.com/user-attachments/assets/bc24acf0-8d40-47b1-be5f-3d8082516127" />
+
+
+
+
+
+
+# Grafana
+
+
+
+
+
+<img width="1903" height="967" alt="image" src="https://github.com/user-attachments/assets/1d194b17-5cb5-4cb2-a2b3-1b1bef35ad51" />
+
+
+
+
+
+
+
+
+
+<img width="1918" height="988" alt="image" src="https://github.com/user-attachments/assets/2e10f1d0-0f46-4218-9884-3f09e82b69a0" />
+
+
+
+
+
+
+
+
+
+
+
+<img width="1755" height="1067" alt="image" src="https://github.com/user-attachments/assets/183d4c58-c514-4c43-a4e5-578c607eca46" />
+
+
+
+
+
+
+
 
 
