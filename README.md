@@ -561,6 +561,10 @@ EOF
 
 
 
+Cấp quyền Admin cho Bot, chu kỳ lấy dữ liệu tiếp theo (khi giá Bitcoin > 60000) sẽ lập tức kích hoạt luồng.
+
+
+
 
 
 
@@ -572,5 +576,56 @@ EOF
 
 
 
+### Sao lưu (Backup) và Phục hồi (Restore) ứng dụng Docker Compose
+
+#### 1. Dừng hệ thống
+docker compose down
+
+#### 2. Nén toàn bộ thư mục bài Lab thành 1 file duy nhất
+tar -czvf baiso2_backup.tar.gz ./thu_muc_bai_lab/
+
+#### 3. Xóa sạch mọi container và dữ liệu trên máy để test khôi phục
+docker system prune -a --volumes -f
+
+#### 4. Giải nén để khôi phục
+tar -xzvf baiso2_backup.tar.gz
+
+#### 5. Chạy lại
+docker compose up -d
 
 
+
+
+
+
+
+<img width="1322" height="914" alt="image" src="https://github.com/user-attachments/assets/833a723f-ccab-4485-b509-33de4587d435" />
+
+
+
+
+
+
+
+
+
+
+
+
+
+<img width="1431" height="960" alt="image" src="https://github.com/user-attachments/assets/6fd4b97a-c404-4fab-99a7-6dc11f3ee161" />
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<img width="1436" height="997" alt="image" src="https://github.com/user-attachments/assets/95638fac-2296-4f89-9a2e-6b869b616dab" />
